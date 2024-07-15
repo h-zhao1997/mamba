@@ -46,6 +46,7 @@ class Mamba2(nn.Module):
         dt_max=0.1,
         dt_init_floor=1e-4,
         dt_limit=(0.0, float("inf")),
+        learnable_init_states=False,
         bias=False,
         conv_bias=True,
         # Fused kernel and sharding options
@@ -144,7 +145,7 @@ class Mamba2(nn.Module):
                                               process_group=self.process_group, sequence_parallel=self.sequence_parallel,
                                               **factory_kwargs)
 
-    def forward(self, u, seqlen=None, seq_idx=None, inference_params=None):
+    def forward(self, u, seqlen=None, seq_idx=None, inference_params=None, initial_states=None, initial_conv_states=None):
         """
         u: (batch, seqlen, hidden_dim) if seqlen=None.
             If seqlen is not None, u is (batch * seqlen, hidden_dim). This is so that when we
@@ -171,6 +172,11 @@ class Mamba2(nn.Module):
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
         A = -torch.exp(self.A_log)  # (nheads) or (d_inner, d_state)
+        if initial_states is not None:
+            initial_states = repeat(initial_states, "... -> b ...", b=batch)
+        if initial_conv_states is not None:
+            initial_conv_states = repeat(initial_conv_states, "... -> b ...", b=batch)
+            conv_states = initial_conv_states
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
         if self.use_mem_eff_path and inference_params is None:
             out = mamba_split_conv1d_scan_combined(
@@ -190,6 +196,7 @@ class Mamba2(nn.Module):
                 headdim=None if self.D_has_hdim else self.headdim,
                 ngroups=self.ngroups,
                 norm_before_gate=self.norm_before_gate,
+                initial_states=initial_states,
                 **dt_limit_kwargs,
             )
             if seqlen_og is not None:
@@ -234,6 +241,7 @@ class Mamba2(nn.Module):
                 dt_bias=self.dt_bias,
                 dt_softplus=True,
                 seq_idx=seq_idx,
+                initial_states=initial_states,
                 **dt_limit_kwargs,
                 return_final_states=ssm_state is not None,
             )
